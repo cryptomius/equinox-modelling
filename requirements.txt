@@ -1,1 +1,1 @@
-git+https://github.com/plotly/plotly.py
+plotly
