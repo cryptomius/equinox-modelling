@@ -11,7 +11,6 @@ def geometric_mean(x, y):
     return (Decimal(x) * Decimal(y)).sqrt()
 
 def calc_y(x, xy, A):
-    # Simplified formula for y given x in a PCL pool
     return xy / x
 
 def compute_swap(x1, y1, dx, A, gamma, mid_fee, out_fee, fee_gamma):
