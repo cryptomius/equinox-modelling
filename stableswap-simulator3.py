@@ -222,7 +222,7 @@ def main():
         "LP Participation (%)",
         min_value=0,
         max_value=100,
-        value=30,
+        value=50,
         step=1,
         format="%d"
     )
@@ -276,8 +276,8 @@ def main():
     
     # Simulation Parameters
     st.sidebar.header("Simulation Parameters")
-    amp = st.sidebar.slider("Amplification Parameter", 1, 1000, 100)
-    sell_pressure = st.sidebar.slider("Sell Pressure each unlock (%)", 0, 100, 30)
+    amp = st.sidebar.slider("Amplification Parameter", 1, 1000, 50)
+    sell_pressure = st.sidebar.slider("Sell Pressure each unlock (%)", 0, 100, 15)
     
     # Initialize simulator
     simulator = StableSwapSimulator(
