@@ -65,6 +65,46 @@ def display_lockup_section(data: Dict, title: str, total_committed: float):
         with cols[i]:
             display_metric_with_percent(DURATION_LABELS[lockups[i]['duration']], value, percentage)
 
+def display_incentives_section():
+    """Display incentives section with Single Sided and LP Vault values."""
+    st.header("Incentives")
+    
+    # Query incentives data
+    single_sided = query_contract({"incentives": {"stake_type": "single_staking"}})
+    lp_vault = query_contract({"incentives": {"stake_type": "lp_staking"}})
+    
+    # Calculate totals
+    total_beclip = (float(single_sided['data']['beclip']) + float(lp_vault['data']['beclip'])) / 1_000_000
+    total_eclip = (float(single_sided['data']['eclip']) + float(lp_vault['data']['eclip'])) / 1_000_000
+    
+    # Display totals first
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Total bECLIP", format_number(total_beclip))
+    with col2:
+        st.metric("Total ECLIP", format_number(total_eclip))
+    
+    st.markdown("---")  # Add a visual separator
+    
+    # Create two columns for Single Sided and LP Vault
+    col1, col2 = st.columns(2)
+    
+    # Display Single Sided incentives
+    with col1:
+        st.subheader("Single Sided")
+        ss_beclip = float(single_sided['data']['beclip']) / 1_000_000
+        ss_eclip = float(single_sided['data']['eclip']) / 1_000_000
+        st.metric("bECLIP", format_number(ss_beclip))
+        st.metric("ECLIP", format_number(ss_eclip))
+    
+    # Display LP Vault incentives
+    with col2:
+        st.subheader("LP Vault")
+        lp_beclip = float(lp_vault['data']['beclip']) / 1_000_000
+        lp_eclip = float(lp_vault['data']['eclip']) / 1_000_000
+        st.metric("bECLIP", format_number(lp_beclip))
+        st.metric("ECLIP", format_number(lp_eclip))
+
 def main():
     st.set_page_config(page_title="Equinox Lockdrop", layout="wide")
     st.title("Equinox Lockdrop")
@@ -98,6 +138,11 @@ def main():
         with st.expander("LP Staking Raw Data"):
             st.json(lp_data)
         display_lockup_section(lp_data, "LP Staking xASTRO", total_committed)
+        
+        st.markdown("---")  # Add a visual separator
+        
+        # Display Incentives section at the bottom
+        display_incentives_section()
         
     except Exception as e:
         st.error(f"Error fetching data: {str(e)}")
