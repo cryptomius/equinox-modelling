@@ -129,14 +129,10 @@ def main():
         st.markdown("---")  # Add a visual separator
         
         # Display detailed sections
-        with st.expander("Single Sided Raw Data"):
-            st.json(single_sided_data)
         display_lockup_section(single_sided_data, "Single Sided Staking xASTRO", total_committed)
         
         st.markdown("---")  # Add a visual separator
         
-        with st.expander("LP Staking Raw Data"):
-            st.json(lp_data)
         display_lockup_section(lp_data, "LP Staking xASTRO", total_committed)
         
         st.markdown("---")  # Add a visual separator
