@@ -33,6 +33,11 @@ def calculate_percentages(values: List[float]) -> List[float]:
     total = sum(values)
     return [value / total * 100 if total > 0 else 0 for value in values]
 
+def display_metric_with_percent(label: str, value: float, percentage: float):
+    """Display a metric with a percentage below it without delta arrows."""
+    st.metric(label, format_number(value))
+    st.markdown(f"<div style='text-align: center; color: #737373;'>{percentage:.0f}%</div>", unsafe_allow_html=True)
+
 def display_lockup_section(data: Dict, title: str, total_committed: float):
     """Display a lockup section with its breakdown."""
     st.subheader(title)
@@ -58,11 +63,7 @@ def display_lockup_section(data: Dict, title: str, total_committed: float):
     # Display each duration's data
     for i, (value, percentage) in enumerate(zip(values, percentages)):
         with cols[i]:
-            st.metric(
-                DURATION_LABELS[lockups[i]['duration']],
-                format_number(value),
-                f"{percentage:.0f}%"
-            )
+            display_metric_with_percent(DURATION_LABELS[lockups[i]['duration']], value, percentage)
 
 def main():
     st.set_page_config(page_title="Equinox Lockdrop", layout="wide")
