@@ -52,7 +52,10 @@ class StableSwapSimulator:
             
         new_d = self.compute_d(amp, new_xastro, new_eclip)
         
-        return (d - new_d) / d
+        # Calculate price impact based on the change in D
+        price_impact = abs(new_d - d) / d
+        
+        return price_impact
     
     def simulate(self, amp, sell_pressure_pct, total_eclip, unlock_percents, days=220):
         """Run the simulation with given parameters."""
@@ -122,7 +125,7 @@ class StableSwapSimulator:
                 # Normal day - some price recovery if depegged
                 last_ratio = results[-1]['ratio']
                 if last_ratio != 1:
-                    recovery = (1 - last_ratio) * 0.1  # 10% recovery per day
+                    recovery = (1 - last_ratio) * 0.1 * (1 / amp)  # Adjust recovery speed based on amp
                     new_ratio = last_ratio + recovery
                     xastro_price = results[-1]['xastro_price'] * (1 + recovery)
                     eclip_price = results[-1]['eclip_price'] * (1 - recovery)
