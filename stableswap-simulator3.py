@@ -206,48 +206,44 @@ def main():
     # Sidebar - Initial Parameters with configuration
     st.sidebar.header("Initial Pool Configuration")
     
-    total_eclip = st.sidebar.number_input(
-        "Total eclipASTRO Created",
+    total_xastro_locked = st.sidebar.number_input(
+        "Total xASTRO Locked",
         min_value=1_000_000,
         max_value=100_000_000,
-        value=21_250_000,
+        value=25_000_000,  # Default to 25 million
         step=100_000,
+        format="%d"
+    )
+        
+    lp_participation = st.sidebar.slider(
+        "LP Participation (%)",
+        min_value=0,
+        max_value=100,
+        value=30,
+        step=1,
         format="%d"
     )
     
-    initial_xastro = st.sidebar.number_input(
-        "Initial xASTRO in Pool",
-        min_value=1_000_000,
-        max_value=50_000_000,
-        value=3_750_000,
-        step=100_000,
-        format="%d"
-    )
+    # Calculate derived values
+    total_eclip = total_xastro_locked * (1 - lp_participation/200)
+    initial_xastro = total_xastro_locked * (lp_participation/200)
+    initial_eclip = initial_xastro
     
-    initial_eclip = st.sidebar.number_input(
-        "Initial eclipASTRO in Pool",
-        min_value=1_000_000,
-        max_value=50_000_000,
-        value=3_750_000,
-        step=100_000,
-        format="%d"
-    )
+    # Display calculated values with thousands separators
+    st.sidebar.write(f"Total eclipASTRO Created: {total_eclip:,.0f}")
+    st.sidebar.write(f"Initial xASTRO in Pool: {initial_xastro:,.0f}")
+    st.sidebar.write(f"Initial eclipASTRO in Pool: {initial_eclip:,.0f}")
     
     # Unlock Schedule Configuration
     st.sidebar.header("Unlock Schedule")
-    col1, col2 = st.sidebar.columns(2)
-    
-    unlock_percents = []
     unlock_days = [2, 30, 90, 180]
+    unlock_percents = []
     
-    with col1:
-        st.write("Day")
-        for day in unlock_days:
+    for i, day in enumerate(unlock_days):
+        col1, col2 = st.sidebar.columns([1, 3])
+        with col1:
             st.write(f"Day {day}")
-    
-    with col2:
-        st.write("Percent")
-        for i in range(4):
+        with col2:
             unlock_percent = st.number_input(
                 f"Unlock {i+1}",
                 min_value=0,
@@ -278,7 +274,7 @@ def main():
     # Simulation Parameters
     st.sidebar.header("Simulation Parameters")
     amp = st.sidebar.slider("Amplification Parameter", 1, 1000, 100)
-    sell_pressure = st.sidebar.slider("Sell Pressure (%)", 0, 100, 30)
+    sell_pressure = st.sidebar.slider("Sell Pressure each unlock (%)", 0, 100, 30)
     
     # Initialize simulator
     simulator = StableSwapSimulator(
