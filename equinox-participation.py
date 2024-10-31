@@ -174,13 +174,19 @@ async def fetch_all_lockup_info(unique_senders, progress_bar):
     
     return wallet_positions
 
+def mask_address(address):
+    """Helper function to mask wallet addresses"""
+    if not address or len(address) < 10:
+        return address
+    return f"{address[:8]}....{address[-4:]}"
+
 def create_positions_dataframe(wallet_positions):
     # Create DataFrame
     df = pd.DataFrame.from_dict(wallet_positions, orient='index')
     
     # Flatten the nested dictionaries
     df_flat = pd.DataFrame({
-        'wallet': df.index,
+        'wallet': [mask_address(addr) for addr in df.index],
         'single_flexible': df.apply(lambda x: x['single']['Flexible'], axis=1),
         'single_1month': df.apply(lambda x: x['single']['1 Month'], axis=1),
         'single_3months': df.apply(lambda x: x['single']['3 Months'], axis=1),
@@ -296,7 +302,7 @@ async def main():
                 amounts = [d['amount'] for d in data]
                 wallets = [d['wallet'] for d in data]
                 indices = [d['index'] for d in data]
-                hover_text = [f"{w}<br>{'{:,.0f}'.format(a)} xASTRO" 
+                hover_text = [f"{mask_address(w)}<br>{'{:,.0f}'.format(a)} xASTRO" 
                             for w, a in zip(wallets, amounts)]
                 
                 fig_single.add_trace(go.Bar(
@@ -377,7 +383,7 @@ async def main():
                 amounts = [d['amount'] for d in data]
                 wallets = [d['wallet'] for d in data]
                 indices = [d['index'] for d in data]
-                hover_text = [f"{w}<br>{'{:,.0f}'.format(a)} xASTRO" 
+                hover_text = [f"{mask_address(w)}<br>{'{:,.0f}'.format(a)} xASTRO" 
                             for w, a in zip(wallets, amounts)]
                 
                 fig_lp.add_trace(go.Bar(
