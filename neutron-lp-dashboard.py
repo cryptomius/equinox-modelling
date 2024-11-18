@@ -168,7 +168,7 @@ def process_transactions(transactions, contract_address):
     #                 st.write(f"Value (raw): {attr.get('value')}")
     
     swaps = []
-    liquidity_changes = []
+    liquidity_events = []
     
     # Will store running totals, starting from 0
     pool_states = [{
@@ -226,7 +226,8 @@ def process_transactions(transactions, contract_address):
                                     'commission_amount': commission_amount_std,
                                     'offer_asset': offer_asset,
                                     'ask_asset': ask_asset,
-                                    'tx_hash': tx['hash']
+                                    'tx_hash': tx['hash'],
+                                    'sender': attrs.get('sender', '')
                                 })
                                 
                                 # Update pool state after swap
@@ -292,12 +293,13 @@ def process_transactions(transactions, contract_address):
                                 # st.write(f"\nFinal Parsed Amounts (in standard units) - xASTRO: {assets[0]}, eclipASTRO: {assets[1]}")
                                 
                                 if any(assets):
-                                    liquidity_changes.append({
+                                    liquidity_events.append({
                                         'timestamp': timestamp,
                                         'xastro_amount': assets[0],
                                         'eclipastro_amount': assets[1],
                                         'tx_hash': tx['hash'],
-                                        'type': 'provide'
+                                        'type': 'provide',
+                                        'sender': attrs.get('sender', '')  # Add sender field for liquidity events
                                     })
                                     
                                     # Update pool state
@@ -331,12 +333,13 @@ def process_transactions(transactions, contract_address):
                                         continue
                                 
                                 if any(assets):
-                                    liquidity_changes.append({
+                                    liquidity_events.append({
                                         'timestamp': timestamp,
                                         'xastro_amount': -assets[0],
                                         'eclipastro_amount': -assets[1],
                                         'tx_hash': tx['hash'],
-                                        'type': 'withdraw'
+                                        'type': 'withdraw',
+                                        'sender': attrs.get('sender', '')  # Add sender field for liquidity events
                                     })
                                     
                                     # Update pool state
@@ -356,11 +359,11 @@ def process_transactions(transactions, contract_address):
             st.write(f"Error processing transaction {tx.get('hash', 'unknown')}: {str(e)}")
             continue
     
-    st.write(f"Processed {len(swaps)} swaps and {len(liquidity_changes)} liquidity changes")
+    st.write(f"Processed {len(swaps)} swaps and {len(liquidity_events)} liquidity changes")
     
     # Create DataFrames with proper column structure
     swaps_df = pd.DataFrame(swaps)
-    liquidity_df = pd.DataFrame(liquidity_changes)
+    liquidity_df = pd.DataFrame(liquidity_events)
     pool_states_df = pd.DataFrame(pool_states)
     
     if not swaps_df.empty:
@@ -375,9 +378,11 @@ def process_transactions(transactions, contract_address):
         # Calculate deltas based on swap direction
         for idx, row in swaps_df.iterrows():
             if 'xASTRO' in row['offer_asset']:
+                # xASTRO sell (negative)
                 swaps_df.at[idx, 'xastro_delta'] = row['offer_amount']
                 swaps_df.at[idx, 'eclipastro_delta'] = -row['return_amount']
             else:
+                # xASTRO buy (positive)
                 swaps_df.at[idx, 'eclipastro_delta'] = row['offer_amount']
                 swaps_df.at[idx, 'xastro_delta'] = -row['return_amount']
     
@@ -452,6 +457,22 @@ def get_swap_rates():
         st.error(f"Error fetching swap rates: {str(e)}")
         return pd.DataFrame(), pd.DataFrame()
 
+def get_astroport_price_data():
+    client = pymongo.MongoClient(st.secrets["mongo"]["connection_string"])
+    db = client['shannon-test']
+    collection = db['astroport-price-data']
+    
+    # Query all documents and sort by timestamp
+    cursor = collection.find({}).sort('timestamp', 1)
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(list(cursor))
+    
+    # Convert timestamp from MongoDB format
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    
+    return df
+
 def create_dashboard():
     st.title("Neutron Astroport LP Analytics")
     
@@ -478,14 +499,14 @@ def create_dashboard():
     # Display raw data for debugging
     # st.subheader("Debug Information")
     
-    if st.checkbox("Show processed swap data"):
-        st.write(swaps_df)
+    # if st.checkbox("Show processed swap data"):
+    #     st.write(swaps_df)
     
-    if st.checkbox("Show processed liquidity data"):
-        st.write(liquidity_df)
+    # if st.checkbox("Show processed liquidity data"):
+    #     st.write(liquidity_df)
     
-    if st.checkbox("Show pool states"):
-        st.write(pool_states_df)
+    # if st.checkbox("Show pool states"):
+    #     st.write(pool_states_df)
     
     # Create visualizations
     if not pool_states_df.empty:
@@ -528,6 +549,28 @@ def create_dashboard():
             # Swap Volume Chart with Pool Ratio
             fig3 = make_subplots(specs=[[{"secondary_y": True}]])
             
+            # Add pool ratio line first with high zorder
+            fig3.add_trace(
+                go.Scatter(
+                    x=pool_states_df['timestamp'],
+                    y=pool_states_df['pool_ratio'],
+                    name='Pool Ratio',
+                    mode='lines',
+                    line=dict(color='purple', width=1.5),
+                    hovertemplate='Ratio: %{y:.4f}<extra></extra>',
+                    legendrank=1,  # Make it appear first in legend
+                    zorder=1000  # Ensure it renders on top
+                ),
+                secondary_y=False
+            )
+
+            # Add horizontal line at ratio = 1
+            fig3.add_hline(
+                y=1, line_dash="dash", line_color="gray",
+                annotation_text="1:1 Ratio", 
+                annotation_position="bottom right"
+            )
+
             # Create empty lists to store all the data points
             sell_times = []
             sell_values = []
@@ -539,76 +582,119 @@ def create_dashboard():
             # Collect all data points first
             for idx, row in swaps_df.iterrows():
                 if 'xASTRO' in row['offer_asset']:
-                    # xASTRO sell (negative)
-                    buy_times.append(row['timestamp'])
-                    buy_values.append(abs(row['xastro_delta']))
-                    buy_hashes.append(row['tx_hash'])
-                else:
-                    # xASTRO buy (positive)
+                    # xASTRO sell (positive)
                     sell_times.append(row['timestamp'])
-                    sell_values.append(-abs(row['return_amount']))
+                    sell_values.append(abs(row['xastro_delta']))  # Make positive
                     sell_hashes.append(row['tx_hash'])
-            
-            # Add pool ratio line
-            fig3.add_trace(
-                go.Scatter(
-                    x=pool_states_df['timestamp'],
-                    y=pool_states_df['pool_ratio'],
-                    name='Pool Ratio',
-                    mode='lines',
-                    line=dict(color='purple', width=1),
-                    hovertemplate='Ratio: %{y:.4f}<extra></extra>'
-                ),
-                secondary_y=False
-            )
-            
-            # Add horizontal line at ratio = 1
-            fig3.add_hline(
-                y=1,
-                line_dash="dash",
-                line_color="gray",
-                secondary_y=False
-            )
+                else:
+                    # xASTRO buy (negative)
+                    buy_times.append(row['timestamp'])
+                    buy_values.append(-abs(row['return_amount']))  # Make negative
+                    buy_hashes.append(row['tx_hash'])
             
             # Add all sells as one trace
             if sell_times:
-                fig3.add_trace(
-                    go.Bar(
-                        x=sell_times,
-                        y=sell_values,
-                        name='Sell xASTRO',
-                        marker_color='red',
-                        width=3600000,  # 1 hour in milliseconds
-                        customdata=sell_hashes,
-                        hovertemplate=(
-                            'Time: %{x}<br>' +
-                            'Amount: %{y:.6f}<br>' +
-                            'TX Hash: %{customdata}<br>' +
-                            '<extra></extra>'
-                        )
-                    ),
-                    secondary_y=True
-                )
+                # Split sells into rebalancing and other sells
+                rebalance_sells = swaps_df[
+                    (swaps_df['offer_asset'].str.contains('xASTRO')) & 
+                    (swaps_df['sender'] == 'neutron1f5qswtwykvgyerzw2uav3kl7kku4mzwq34zhrl')
+                ]
+                other_sells = swaps_df[
+                    (swaps_df['offer_asset'].str.contains('xASTRO')) & 
+                    (swaps_df['sender'] != 'neutron1f5qswtwykvgyerzw2uav3kl7kku4mzwq34zhrl')
+                ]
+                
+                # Add rebalancing sells
+                if not rebalance_sells.empty:
+                    fig3.add_trace(
+                        go.Bar(
+                            x=rebalance_sells['timestamp'],
+                            y=abs(rebalance_sells['xastro_delta']),  # Make positive
+                            name='Rebalancing Sell xASTRO',
+                            marker_color='lightblue',
+                            width=3600000,  # 1 hour in milliseconds
+                            customdata=rebalance_sells['tx_hash'].values,
+                            hovertemplate=(
+                                'Time: %{x}<br>' +
+                                'Amount: %{y:.6f}<br>' +
+                                'TX Hash: %{customdata}<br>' +
+                                '<extra></extra>'
+                            )
+                        ),
+                        secondary_y=True
+                    )
+                
+                # Add other sells
+                if not other_sells.empty:
+                    fig3.add_trace(
+                        go.Bar(
+                            x=other_sells['timestamp'],
+                            y=abs(other_sells['xastro_delta']),  # Make positive
+                            name='Sell xASTRO',
+                            marker_color='green',
+                            width=3600000,  # 1 hour in milliseconds
+                            customdata=other_sells['tx_hash'].values,
+                            hovertemplate=(
+                                'Time: %{x}<br>' +
+                                'Amount: %{y:.6f}<br>' +
+                                'TX Hash: %{customdata}<br>' +
+                                '<extra></extra>'
+                            )
+                        ),
+                        secondary_y=True
+                    )
             
             # Add all buys as one trace
             if buy_times:
-                fig3.add_trace(
-                    go.Bar(
-                        x=buy_times,
-                        y=buy_values,
-                        name='Buy xASTRO',
-                        marker_color='green',
-                        width=3600000,  # 1 hour in milliseconds
-                        customdata=buy_hashes,
-                        hovertemplate=(
-                            'Time: %{x}<br>' +
-                            'Amount: %{y:.6f}<br>' +
-                            'TX Hash: %{customdata}<br>' +
-                            '<extra></extra>'
-                        )
-                    ),
-                    secondary_y=True
-                )
+                # Split buys into rebalancing and other buys
+                rebalance_buys = swaps_df[
+                    (swaps_df['offer_asset'].str.contains('eclipASTRO')) & 
+                    (swaps_df['sender'] == 'neutron1f5qswtwykvgyerzw2uav3kl7kku4mzwq34zhrl')
+                ]
+                other_buys = swaps_df[
+                    (swaps_df['offer_asset'].str.contains('eclipASTRO')) & 
+                    (swaps_df['sender'] != 'neutron1f5qswtwykvgyerzw2uav3kl7kku4mzwq34zhrl')
+                ]
+                
+                # Add rebalancing buys
+                if not rebalance_buys.empty:
+                    fig3.add_trace(
+                        go.Bar(
+                            x=rebalance_buys['timestamp'],
+                            y=-abs(rebalance_buys['return_amount']),  # Make negative
+                            name='Rebalancing Buy xASTRO',
+                            marker_color='lightblue',
+                            width=3600000,  # 1 hour in milliseconds
+                            customdata=rebalance_buys['tx_hash'].values,
+                            hovertemplate=(
+                                'Time: %{x}<br>' +
+                                'Amount: %{y:.6f}<br>' +
+                                'TX Hash: %{customdata}<br>' +
+                                '<extra></extra>'
+                            )
+                        ),
+                        secondary_y=True
+                    )
+                
+                # Add other buys
+                if not other_buys.empty:
+                    fig3.add_trace(
+                        go.Bar(
+                            x=other_buys['timestamp'],
+                            y=-abs(other_buys['return_amount']),  # Make negative
+                            name='Buy xASTRO',
+                            marker_color='red',
+                            width=3600000,  # 1 hour in milliseconds
+                            customdata=other_buys['tx_hash'].values,
+                            hovertemplate=(
+                                'Time: %{x}<br>' +
+                                'Amount: %{y:.6f}<br>' +
+                                'TX Hash: %{customdata}<br>' +
+                                '<extra></extra>'
+                            )
+                        ),
+                        secondary_y=True
+                    )
             
             fig3.update_layout(
                 title='xASTRO Swap Volumes and Pool Ratio',
@@ -616,7 +702,11 @@ def create_dashboard():
                 showlegend=True,
                 hovermode='x unified',
                 dragmode=False,
-                clickmode='event'
+                clickmode='event',
+                barmode='relative',  # Ensure proper bar stacking
+                xaxis=dict(layer='below traces'),  # Force axis below all traces
+                yaxis=dict(layer='below traces'),
+                yaxis2=dict(layer='below traces')
             )
             
             fig3.update_xaxes(title_text='Date')
@@ -674,73 +764,127 @@ def create_dashboard():
                 xastro_adds = liquidity_df[liquidity_df['xastro_amount'] > 0]
                 xastro_removes = liquidity_df[liquidity_df['xastro_amount'] < 0]
                 
-                if not xastro_adds.empty:
-                    fig5.add_trace(
-                        go.Bar(
-                            x=xastro_adds['timestamp'],
-                            y=xastro_adds['xastro_amount'],
-                            name='Add xASTRO',
-                            marker_color='green',
-                            width=3600000,  # 1 hour in milliseconds
-                            customdata=xastro_adds['tx_hash'].values,
-                            hovertemplate=(
-                                'Time: %{x}<br>' +
-                                'Amount: %{y:.6f}<br>' +
-                                'TX Hash: %{customdata}<br>' +
-                                '<extra></extra>'
-                            )
-                        ),
-                        secondary_y=True
-                    )
+                # Split adds into rebalancing and other adds
+                rebalance_adds = xastro_adds[xastro_adds['sender'] == 'neutron1f5qswtwykvgyerzw2uav3kl7kku4mzwq34zhrl']
+                other_adds = xastro_adds[xastro_adds['sender'] != 'neutron1f5qswtwykvgyerzw2uav3kl7kku4mzwq34zhrl']
                 
-                if not xastro_removes.empty:
-                    fig5.add_trace(
-                        go.Bar(
-                            x=xastro_removes['timestamp'],
-                            y=xastro_removes['xastro_amount'],
-                            name='Remove xASTRO',
-                            marker_color='red',
-                            width=3600000,  # 1 hour in milliseconds
-                            customdata=xastro_removes['tx_hash'].values,
-                            hovertemplate=(
-                                'Time: %{x}<br>' +
-                                'Amount: %{y:.6f}<br>' +
-                                'TX Hash: %{customdata}<br>' +
-                                '<extra></extra>'
-                            )
-                        ),
-                        secondary_y=True
-                    )
+                # Split removes into rebalancing and other removes
+                rebalance_removes = xastro_removes[xastro_removes['sender'] == 'neutron1f5qswtwykvgyerzw2uav3kl7kku4mzwq34zhrl']
+                other_removes = xastro_removes[xastro_removes['sender'] != 'neutron1f5qswtwykvgyerzw2uav3kl7kku4mzwq34zhrl']
                 
-                # Add pool ratio line
+                # Add pool ratio line first with high zorder
                 fig5.add_trace(
                     go.Scatter(
                         x=pool_states_df['timestamp'],
                         y=pool_states_df['pool_ratio'],
                         name='Pool Ratio',
                         mode='lines',
-                        line=dict(color='purple', width=1),
-                        hovertemplate='Ratio: %{y:.4f}<extra></extra>'
+                        line=dict(color='purple', width=1.5),
+                        hovertemplate='Ratio: %{y:.4f}<extra></extra>',
+                        legendrank=1,  # Make it appear first in legend
+                        zorder=1000  # Ensure it renders on top
                     ),
                     secondary_y=False
                 )
-                
+
                 # Add horizontal line at ratio = 1
                 fig5.add_hline(
-                    y=1,
-                    line_dash="dash",
-                    line_color="gray",
-                    secondary_y=False
+                    y=1, line_dash="dash", line_color="gray",
+                    annotation_text="1:1 Ratio", 
+                    annotation_position="bottom right"
                 )
+
+                # Add rebalancing adds
+                if not rebalance_adds.empty:
+                    fig5.add_trace(
+                        go.Bar(
+                            x=rebalance_adds['timestamp'],
+                            y=rebalance_adds['xastro_amount'],
+                            name='Rebalancing Add xASTRO',
+                            marker_color='lightblue',
+                            width=3600000,  # 1 hour in milliseconds
+                            customdata=rebalance_adds['tx_hash'].values,
+                            hovertemplate=(
+                                'Time: %{x}<br>' +
+                                'Amount: %{y:.6f}<br>' +
+                                'TX Hash: %{customdata}<br>' +
+                                '<extra></extra>'
+                            )
+                        ),
+                        secondary_y=True
+                    )
+                
+                # Add other adds
+                if not other_adds.empty:
+                    fig5.add_trace(
+                        go.Bar(
+                            x=other_adds['timestamp'],
+                            y=other_adds['xastro_amount'],
+                            name='Add xASTRO',
+                            marker_color='green',
+                            width=3600000,  # 1 hour in milliseconds
+                            customdata=other_adds['tx_hash'].values,
+                            hovertemplate=(
+                                'Time: %{x}<br>' +
+                                'Amount: %{y:.6f}<br>' +
+                                'TX Hash: %{customdata}<br>' +
+                                '<extra></extra>'
+                            )
+                        ),
+                        secondary_y=True
+                    )
+                
+                # Add rebalancing removes
+                if not rebalance_removes.empty:
+                    fig5.add_trace(
+                        go.Bar(
+                            x=rebalance_removes['timestamp'],
+                            y=rebalance_removes['xastro_amount'],
+                            name='Rebalancing Remove xASTRO',
+                            marker_color='lightblue',
+                            width=3600000,  # 1 hour in milliseconds
+                            customdata=rebalance_removes['tx_hash'].values,
+                            hovertemplate=(
+                                'Time: %{x}<br>' +
+                                'Amount: %{y:.6f}<br>' +
+                                'TX Hash: %{customdata}<br>' +
+                                '<extra></extra>'
+                            )
+                        ),
+                        secondary_y=True
+                    )
+                
+                # Add other removes
+                if not other_removes.empty:
+                    fig5.add_trace(
+                        go.Bar(
+                            x=other_removes['timestamp'],
+                            y=other_removes['xastro_amount'],
+                            name='Remove xASTRO',
+                            marker_color='red',
+                            width=3600000,  # 1 hour in milliseconds
+                            customdata=other_removes['tx_hash'].values,
+                            hovertemplate=(
+                                'Time: %{x}<br>' +
+                                'Amount: %{y:.6f}<br>' +
+                                'TX Hash: %{customdata}<br>' +
+                                '<extra></extra>'
+                            )
+                        ),
+                        secondary_y=True
+                    )
                 
                 fig5.update_layout(
                     title='xASTRO Liquidity Events and Pool Ratio',
                     height=500,
                     showlegend=True,
                     hovermode='x unified',
-                    barmode='relative',
+                    barmode='relative',  # Ensure proper bar stacking
                     dragmode=False,
-                    clickmode='event'
+                    clickmode='event',
+                    xaxis=dict(layer='below traces'),  # Force axis below all traces
+                    yaxis=dict(layer='below traces'),
+                    yaxis2=dict(layer='below traces')
                 )
                 
                 fig5.update_xaxes(title_text='Date')
@@ -848,9 +992,10 @@ def create_dashboard():
         fig6.add_hline(
             y=50,
             line_dash="dash",
-            line_color="gray",
+            line_color="white",
             annotation_text="50% Balance",
-            annotation_position="bottom right"
+            annotation_position="right",
+            annotation_font_color="white"
         )
         
         fig6.update_layout(
@@ -869,7 +1014,7 @@ def create_dashboard():
         st.plotly_chart(fig6, use_container_width=True)
     
     # Add Swap Rates Chart
-    st.subheader("Exchange Rates Analysis (100,000 Token Swaps)")
+    st.subheader("Exchange Rates Analysis")
     
     # Fetch swap rates data
     xastro_to_eclip, eclip_to_xastro = get_swap_rates()
@@ -883,7 +1028,8 @@ def create_dashboard():
                 x=xastro_to_eclip['timestamp'],
                 y=xastro_to_eclip['exchange_rate'],
                 name='xASTRO → eclipASTRO',
-                line=dict(color='blue')
+                line=dict(color='blue'),
+                visible='legendonly'  # Hide by default but allow toggling through legend
             )
         )
         
@@ -899,11 +1045,19 @@ def create_dashboard():
         
         # Update layout
         fig_rates.update_layout(
-            title='Exchange Rates Over Time (100,000 Token Swaps)',
+            title='Exchange Rates Over Time',
             xaxis_title='Time',
             yaxis_title='Exchange Rate',
             hovermode='x unified',
             showlegend=True
+        )
+        
+        # Add horizontal line at ratio = 1
+        fig_rates.add_hline(
+            y=1,
+            line_dash="dash",
+            line_color="gray",
+            secondary_y=False
         )
         
         st.plotly_chart(fig_rates, use_container_width=True)
@@ -928,6 +1082,67 @@ def create_dashboard():
             )
     else:
         st.warning("No swap rates data available")
+        
+    # Add Astroport Price Charts
+    astroport_data = get_astroport_price_data()
+    
+    if not astroport_data.empty:
+        # ASTRO Price Chart
+        fig_astro = go.Figure()
+        fig_astro.add_trace(
+            go.Scatter(
+                x=astroport_data['timestamp'],
+                y=astroport_data['astro_price_usd'],
+                mode='lines',
+                name='ASTRO Price',
+                line=dict(color='blue', width=1.5),
+                hovertemplate='Time: %{x}<br>Price: $%{y:.4f}<extra></extra>'
+            )
+        )
+        
+        fig_astro.update_layout(
+            title='ASTRO Price (USD)',
+            height=400,
+            showlegend=True,
+            hovermode='x unified',
+            yaxis_title='Price (USD)',
+            xaxis_title='Date'
+        )
+        
+        st.plotly_chart(fig_astro, use_container_width=True)
+        
+        # xASTRO:ASTRO Ratio Chart
+        fig_ratio = go.Figure()
+        fig_ratio.add_trace(
+            go.Scatter(
+                x=astroport_data['timestamp'],
+                y=astroport_data['xastro_astro_ratio'],
+                mode='lines',
+                name='xASTRO:ASTRO Ratio',
+                line=dict(color='green', width=1.5),
+                hovertemplate='Time: %{x}<br>Ratio: %{y:.4f}<extra></extra>'
+            )
+        )
+        
+        # Add horizontal line at ratio = 1
+        fig_ratio.add_hline(
+            y=1,
+            line_dash="dash",
+            line_color="gray",
+            annotation_text="1:1 Ratio",
+            annotation_position="bottom right"
+        )
+        
+        fig_ratio.update_layout(
+            title='xASTRO:ASTRO Exchange Rate',
+            height=400,
+            showlegend=True,
+            hovermode='x unified',
+            yaxis_title='Ratio',
+            xaxis_title='Date'
+        )
+        
+        st.plotly_chart(fig_ratio, use_container_width=True)
         
 if __name__ == "__main__":
     st.set_page_config(page_title="Neutron Astroport LP Analytics", layout="wide")
