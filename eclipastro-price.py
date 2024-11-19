@@ -21,12 +21,16 @@ def get_price_data():
     client = init_connection()
     db = client["shannon-test"]
     
-    # Query the last 30 days of data
+    # Define the minimum start timestamp and 30-day window
+    min_start_time = datetime.fromisoformat("2024-11-19T06:15:34.499+00:00")
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    
+    # Use the later of the two dates
+    query_start_time = max(min_start_time, thirty_days_ago)
     
     data = list(db["astroport-price-data"].find(
         {
-            "timestamp": {"$gte": thirty_days_ago},
+            "timestamp": {"$gte": query_start_time},
             "eclipastro_price_usd": {"$exists": True}
         },
         {
@@ -47,6 +51,36 @@ try:
     df = get_price_data()
     
     if not df.empty:
+        # Get most recent prices
+        latest_prices = df.iloc[-1]
+        eclipastro_price = latest_prices['eclipastro_price_usd']
+        astro_price = latest_prices['astro_price_usd']
+        
+        # Calculate depeg percentage
+        depeg_percentage = ((eclipastro_price / astro_price) - 1) * 100
+        
+        # Display metrics in columns
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "eclipASTRO Price",
+                f"${eclipastro_price:.6f}"
+            )
+        
+        with col2:
+            st.metric(
+                "ASTRO Price",
+                f"${astro_price:.6f}"
+            )
+        
+        with col3:
+            st.metric(
+                "Depeg",
+                f"{depeg_percentage:+.2f}%",
+                help="Percentage difference between eclipASTRO and ASTRO prices. Positive means eclipASTRO is trading above ASTRO."
+            )
+        
         # Melt the dataframe to create a format suitable for multiple lines
         df_melted = pd.melt(
             df,
