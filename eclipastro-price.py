@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 # Page config
 st.set_page_config(
-    page_title="eclipASTRO Price History",
+    page_title="EclipASTRO peg",
     page_icon="📈",
     layout="wide"
 )
@@ -52,7 +52,7 @@ def get_price_data():
     return pd.DataFrame(data)
 
 # App title
-st.title("Token Price History")
+st.title("EclipASTRO peg")
 
 try:
     # Load the data
