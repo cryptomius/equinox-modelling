@@ -11,6 +11,14 @@ st.set_page_config(
     layout="wide"
 )
 
+# Auto-refresh every 5 minutes
+st.markdown(
+    """
+    <meta http-equiv="refresh" content="300">
+    """,
+    unsafe_allow_html=True
+)
+
 # MongoDB connection
 @st.cache_resource
 def init_connection():
@@ -129,7 +137,10 @@ try:
         
         # Display the chart
         st.plotly_chart(fig, use_container_width=True)
-    
+        
+        # Add footnote about auto-update
+        st.caption("📊 Chart automatically updates every 5 minutes")
+        
     else:
         st.warning("No price data available for the selected time period.")
 
