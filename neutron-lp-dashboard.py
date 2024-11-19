@@ -817,37 +817,6 @@ def create_dashboard():
                 }
             )
 
-            # Add custom click handler
-            st.markdown("""
-            <style>
-            .dragcover { pointer-events: none !important; }
-            </style>
-            <script>
-            const plotDiv = document.querySelector('.js-plotly-plot');
-            if (plotDiv) {
-                plotDiv.on('plotly_click', function(data) {
-                    if (data && data.points && data.points[0] && data.points[0].customdata) {
-                        const url = 'https://neutron.celat.one/neutron-1/txs/' + data.points[0].customdata;
-                        window.open(url, '_blank');
-                    }
-                });
-                
-                // Remove dragcover when it appears
-                const observer = new MutationObserver(function(mutations) {
-                    mutations.forEach(function(mutation) {
-                        mutation.addedNodes.forEach(function(node) {
-                            if (node.className === 'dragcover') {
-                                node.remove();
-                            }
-                        });
-                    });
-                });
-                
-                observer.observe(document.body, { childList: true, subtree: true });
-            }
-            </script>
-            """, unsafe_allow_html=True)
-
             # Liquidity Events Chart with Pool Ratio
             if not liquidity_df.empty:
                 fig5 = make_subplots(specs=[[{"secondary_y": True}]])
