@@ -46,15 +46,15 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
     """Fetch contract transactions using WebSocket connection."""
     transactions = []
     page = 1
-    per_page = 100
+    per_page = 25
     total_fetched = 0
+    max_retries = 3
     
     try:
         async with websockets.connect(WS_ENDPOINT, ping_interval=None) as websocket:
             # Build query with timestamp if provided
             query_str = f"wasm._contract_address='{CONTRACT_ADDRESS}'"
             if start_timestamp:
-                # Convert ISO timestamp to Unix timestamp
                 try:
                     dt = datetime.fromisoformat(start_timestamp.replace('Z', '+00:00'))
                     unix_timestamp = int(dt.timestamp())
@@ -92,69 +92,92 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
             st.write(f"Total new transactions to process: {total_count}")
             
             while True:
-                query = {
-                    "jsonrpc": "2.0",
-                    "id": page,
-                    "method": "tx_search",
-                    "params": {
-                        "query": query_str,
-                        "prove": False,
-                        "page": str(page),
-                        "per_page": str(per_page),
-                        "order_by": "desc"
-                    }
-                }
+                retry_count = 0
+                success = False
                 
-                await websocket.send(json.dumps(query))
-                
-                try:
-                    response = await asyncio.wait_for(websocket.recv(), timeout=10.0)
-                    data = json.loads(response)
-                    
-                    if "result" in data and "txs" in data["result"]:
-                        new_txs = data["result"]["txs"]
-                        
-                        if not new_txs:  # No more transactions
-                            break
-                        
-                        # Process transactions in batches for timestamp fetching
-                        tx_batch = []
-                        for tx in new_txs:
-                            tx_data = {
-                                'height': tx.get('height'),
-                                'hash': tx.get('hash'),
-                                'tx_result': tx.get('tx_result', {})
+                while retry_count < max_retries and not success:
+                    try:
+                        query = {
+                            "jsonrpc": "2.0",
+                            "id": page,
+                            "method": "tx_search",
+                            "params": {
+                                "query": query_str,
+                                "prove": False,
+                                "page": str(page),
+                                "per_page": str(per_page),
+                                "order_by": "desc"
                             }
-                            tx_batch.append(tx_data)
+                        }
                         
-                        # Fetch timestamps in parallel
-                        with ThreadPoolExecutor(max_workers=10) as executor:
-                            heights = [tx['height'] for tx in tx_batch]
-                            timestamps = list(executor.map(get_block_time, heights))
+                        await websocket.send(json.dumps(query))
+                        response = await asyncio.wait_for(websocket.recv(), timeout=15.0)
+                        data = json.loads(response)
                         
-                        # Add timestamps to transactions
-                        for tx, timestamp in zip(tx_batch, timestamps):
-                            if timestamp:
-                                tx['timestamp'] = timestamp
-                                transactions.append(tx)
-                        
-                        # Update progress
-                        total_fetched += len(new_txs)
-                        progress = min(total_fetched / total_count, 1.0)
-                        progress_bar.progress(progress)
-                        
-                        # Break if we've fetched all transactions
-                        if total_fetched >= total_count:
-                            break
-                        
-                        page += 1
-                        
-                except asyncio.TimeoutError:
-                    st.warning(f"Timeout on page {page}, retrying...")
-                    continue
-                except Exception as e:
-                    st.error(f"Error processing page {page}: {str(e)}")
-                    continue
+                        if "result" in data and "txs" in data["result"]:
+                            new_txs = data["result"]["txs"]
+                            
+                            if not new_txs:  # No more transactions
+                                success = True
+                                break
+                            
+                            # Process transactions in smaller batches
+                            batch_size = 5
+                            for i in range(0, len(new_txs), batch_size):
+                                batch = new_txs[i:i + batch_size]
+                                tx_batch = []
+                                for tx in batch:
+                                    tx_data = {
+                                        'height': tx.get('height'),
+                                        'hash': tx.get('hash'),
+                                        'tx_result': tx.get('tx_result', {})
+                                    }
+                                    tx_batch.append(tx_data)
+                                
+                                # Fetch timestamps in parallel with limited concurrency
+                                with ThreadPoolExecutor(max_workers=5) as executor:
+                                    heights = [tx['height'] for tx in tx_batch]
+                                    timestamps = list(executor.map(get_block_time, heights))
+                                
+                                # Add timestamps to transactions
+                                for tx, timestamp in zip(tx_batch, timestamps):
+                                    if timestamp:
+                                        tx['timestamp'] = timestamp
+                                        transactions.append(tx)
+                                
+                                # Update progress
+                                total_fetched += len(batch)
+                                progress = min(total_fetched / total_count, 1.0)
+                                progress_bar.progress(progress)
+                                
+                                # Add a small delay between batches
+                                await asyncio.sleep(0.1)
+                            
+                            success = True
+                            
+                            # Break if we've fetched all transactions
+                            if total_fetched >= total_count:
+                                break
+                            
+                            page += 1
+                            
+                    except asyncio.TimeoutError:
+                        retry_count += 1
+                        st.warning(f"Timeout on page {page}, attempt {retry_count} of {max_retries}")
+                        await asyncio.sleep(1)  # Wait before retrying
+                        continue
+                    except Exception as e:
+                        retry_count += 1
+                        st.error(f"Error processing page {page}, attempt {retry_count} of {max_retries}: {str(e)}")
+                        await asyncio.sleep(1)  # Wait before retrying
+                        continue
+                
+                if not success:
+                    st.error(f"Failed to process page {page} after {max_retries} attempts")
+                    break
+                
+                if total_fetched >= total_count:
+                    break
                 
     except Exception as e:
         st.error(f"WebSocket error: {str(e)}")
@@ -370,7 +393,7 @@ def process_transactions(transactions, contract_address):
             
         # Fix the deprecation warning by using fillna instead of replace
         if 'pool_ratio' in pool_states_df.columns:
-            pool_states_df['pool_ratio'] = pool_states_df['pool_ratio'].fillna(method='ffill')
+            pool_states_df['pool_ratio'] = pool_states_df['pool_ratio'].ffill()
     
     return swaps_df, liquidity_df, pool_states_df
 
@@ -855,6 +878,17 @@ def create_dashboard():
                     annotation_position="bottom right"
                 )
 
+                # Update y-axes ranges and titles
+                fig5.update_yaxes(
+                    title_text='Pool Ratio (xASTRO/eclipASTRO)',
+                    secondary_y=False
+                )
+                fig5.update_yaxes(
+                    title_text='xASTRO Amount',
+                    secondary_y=True,
+                    range=[-500000, 500000]  # Set range from -0.5M to 0.5M
+                )
+                
                 # Add rebalancing adds
                 if not rebalance_adds.empty:
                     fig5.add_trace(
