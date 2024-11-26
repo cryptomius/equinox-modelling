@@ -635,6 +635,26 @@ def create_dashboard():
 
     swaps_df, liquidity_df, pool_states_df = process_transactions(transactions, contract_address)
     
+    # Get Astroport price data and prepare it
+    astro_price_df = get_astroport_price_data()
+    
+    if not pool_states_df.empty and not astro_price_df.empty:
+        # Convert all timestamps to UTC and make them timezone-naive
+        pool_states_df['timestamp'] = pd.to_datetime(pool_states_df['timestamp']).dt.tz_localize(None)
+        astro_price_df['timestamp'] = pd.to_datetime(astro_price_df['timestamp']).dt.tz_localize(None)
+        
+        # Create a time-based index for interpolation
+        astro_price_df.set_index('timestamp', inplace=True)
+        astro_price_df = astro_price_df.resample('1min').ffill()  # Resample to minute intervals
+        
+        # Get xASTRO:ASTRO ratio for each pool state timestamp
+        pool_states_df['xastro_astro_ratio'] = pool_states_df['timestamp'].map(
+            lambda x: astro_price_df['xastro_astro_ratio'].asof(x) if x >= astro_price_df.index.min() else 1.0
+        ).fillna(1.0)  # Fill any NaN values with 1.0
+        
+        # Multiply pool ratio by xASTRO:ASTRO ratio
+        pool_states_df['adjusted_pool_ratio'] = pool_states_df['pool_ratio'] * pool_states_df['xastro_astro_ratio']
+    
     # Create visualizations
     if not pool_states_df.empty:
         # Calculate ideal ratio (1.0) distance for color coding
@@ -646,6 +666,11 @@ def create_dashboard():
             return 'green' if after_distance < before_distance else 'red'
 
         def get_surrounding_pool_states(timestamp, pool_states_df):
+            # Ensure timestamp is pandas Timestamp
+            timestamp = pd.to_datetime(timestamp)
+            if timestamp.tz is not None:
+                timestamp = timestamp.tz_localize(None)
+            
             prev_states = pool_states_df[pool_states_df['timestamp'] < timestamp]
             next_states = pool_states_df[pool_states_df['timestamp'] > timestamp]
             
@@ -656,7 +681,8 @@ def create_dashboard():
 
         # Swap Volume Analysis
         if not swaps_df.empty:
-            st.subheader("Swap Analysis")
+            # Ensure swaps_df timestamps are consistent
+            swaps_df['timestamp'] = pd.to_datetime(swaps_df['timestamp']).dt.tz_localize(None)
             
             # Calculate ratio before and after each swap
             swaps_df['prev_ratio'] = None
@@ -680,8 +706,8 @@ def create_dashboard():
             fig3.add_trace(
                 go.Scatter(
                     x=pool_states_df['timestamp'],
-                    y=pool_states_df['pool_ratio'],
-                    name='Pool Ratio',
+                    y=pool_states_df['adjusted_pool_ratio'],
+                    name='Adjusted Pool Ratio',
                     mode='lines',
                     line=dict(color='purple', width=1.5),
                     hovertemplate='Ratio: %{y:.4f}<extra></extra>',
@@ -837,7 +863,7 @@ def create_dashboard():
             )
             
             fig3.update_xaxes(title_text='Date')
-            fig3.update_yaxes(title_text='Pool Ratio (xASTRO/eclipASTRO)', secondary_y=False)
+            fig3.update_yaxes(title_text='Adjusted Pool Ratio (xASTRO/eclipASTRO)', secondary_y=False)
             fig3.update_yaxes(title_text='xASTRO Volume', secondary_y=True)
             
             # Create the chart with click events enabled
@@ -872,8 +898,8 @@ def create_dashboard():
                 fig5.add_trace(
                     go.Scatter(
                         x=pool_states_df['timestamp'],
-                        y=pool_states_df['pool_ratio'],
-                        name='Pool Ratio',
+                        y=pool_states_df['adjusted_pool_ratio'],
+                        name='Adjusted Pool Ratio',
                         mode='lines',
                         line=dict(color='purple', width=1.5),
                         hovertemplate='Ratio: %{y:.4f}<extra></extra>',
@@ -892,7 +918,7 @@ def create_dashboard():
 
                 # Update y-axes ranges and titles
                 fig5.update_yaxes(
-                    title_text='Pool Ratio (xASTRO/eclipASTRO)',
+                    title_text='Adjusted Pool Ratio (xASTRO/eclipASTRO)',
                     secondary_y=False
                 )
                 fig5.update_yaxes(
@@ -995,7 +1021,7 @@ def create_dashboard():
                 )
                 
                 fig5.update_xaxes(title_text='Date')
-                fig5.update_yaxes(title_text='Pool Ratio (xASTRO/eclipASTRO)', secondary_y=False)
+                fig5.update_yaxes(title_text='Adjusted Pool Ratio (xASTRO/eclipASTRO)', secondary_y=False)
                 fig5.update_yaxes(title_text='xASTRO Amount', secondary_y=True)
                 
                 # Create the chart with click events enabled
