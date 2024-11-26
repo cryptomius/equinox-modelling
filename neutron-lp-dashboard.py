@@ -51,17 +51,14 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
     max_retries = 3
     
     try:
+        # Get MongoDB connection for checking existing transactions
+        client = pymongo.MongoClient(st.secrets["mongo"]["connection_string"])
+        db = client["shannon-test"]
+        collection = db["equinox-lp-txns"]
+        
         async with websockets.connect(WS_ENDPOINT, ping_interval=None) as websocket:
-            # Build query with timestamp if provided
+            # Build query - always start from most recent
             query_str = f"wasm._contract_address='{CONTRACT_ADDRESS}'"
-            if start_timestamp:
-                try:
-                    dt = datetime.fromisoformat(start_timestamp.replace('Z', '+00:00'))
-                    unix_timestamp = int(dt.timestamp())
-                    query_str += f" AND tx.timestamp>={unix_timestamp}"
-                except Exception as e:
-                    st.error(f"Error formatting timestamp: {str(e)}")
-                    return []
 
             # Get total count first
             initial_query = {
@@ -73,7 +70,7 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
                     "prove": False,
                     "page": "1",
                     "per_page": "1",
-                    "order_by": "desc"
+                    "order_by": "desc"  # Ensure we're getting newest first
                 }
             }
             
@@ -89,9 +86,10 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
             if total_count == 0:
                 return []
                 
-            st.write(f"Total new transactions to process: {total_count}")
+            st.write(f"Total transactions available: {total_count}")
+            found_existing = False
             
-            while True:
+            while not found_existing:
                 retry_count = 0
                 success = False
                 
@@ -106,7 +104,7 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
                                 "prove": False,
                                 "page": str(page),
                                 "per_page": str(per_page),
-                                "order_by": "desc"
+                                "order_by": "desc"  # Newest first
                             }
                         }
                         
@@ -126,7 +124,15 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
                             for i in range(0, len(new_txs), batch_size):
                                 batch = new_txs[i:i + batch_size]
                                 tx_batch = []
+                                
                                 for tx in batch:
+                                    # Check if transaction already exists in database
+                                    existing_tx = collection.find_one({"hash": tx.get('hash')})
+                                    if existing_tx:
+                                        found_existing = True
+                                        st.info(f"Found existing transaction at page {page}, stopping fetch")
+                                        break
+                                    
                                     tx_data = {
                                         'height': tx.get('height'),
                                         'hash': tx.get('hash'),
@@ -134,29 +140,31 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
                                     }
                                     tx_batch.append(tx_data)
                                 
-                                # Fetch timestamps in parallel with limited concurrency
-                                with ThreadPoolExecutor(max_workers=5) as executor:
-                                    heights = [tx['height'] for tx in tx_batch]
-                                    timestamps = list(executor.map(get_block_time, heights))
+                                if found_existing:
+                                    break
                                 
-                                # Add timestamps to transactions
-                                for tx, timestamp in zip(tx_batch, timestamps):
-                                    if timestamp:
-                                        tx['timestamp'] = timestamp
-                                        transactions.append(tx)
-                                
-                                # Update progress
-                                total_fetched += len(batch)
-                                progress = min(total_fetched / total_count, 1.0)
-                                progress_bar.progress(progress)
+                                if tx_batch:  # Only process if we have new transactions
+                                    # Fetch timestamps in parallel with limited concurrency
+                                    with ThreadPoolExecutor(max_workers=5) as executor:
+                                        heights = [tx['height'] for tx in tx_batch]
+                                        timestamps = list(executor.map(get_block_time, heights))
+                                    
+                                    # Add timestamps to transactions
+                                    for tx, timestamp in zip(tx_batch, timestamps):
+                                        if timestamp:
+                                            tx['timestamp'] = timestamp
+                                            transactions.append(tx)
+                                    
+                                    # Update progress based on current page
+                                    progress = min((page * per_page) / total_count, 1.0)
+                                    progress_bar.progress(progress)
                                 
                                 # Add a small delay between batches
                                 await asyncio.sleep(0.1)
                             
                             success = True
                             
-                            # Break if we've fetched all transactions
-                            if total_fetched >= total_count:
+                            if found_existing:
                                 break
                             
                             page += 1
@@ -176,14 +184,18 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
                     st.error(f"Failed to process page {page} after {max_retries} attempts")
                     break
                 
-                if total_fetched >= total_count:
+                if found_existing:
                     break
                 
     except Exception as e:
         st.error(f"WebSocket error: {str(e)}")
         return []
+    finally:
+        if 'client' in locals():
+            client.close()
     
-    st.success(f"Successfully fetched {len(transactions)} new transactions")
+    if transactions:
+        st.success(f"Successfully fetched {len(transactions)} new transactions")
     return transactions
 
 def parse_refund_assets(refund_assets_str):
