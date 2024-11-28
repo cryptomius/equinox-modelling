@@ -36,25 +36,31 @@ def get_block_time(height):
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 data = response.json()
-                return data['block']['header']['time']
-        except:
+                timestamp = data['block']['header']['time']
+                return timestamp
+        except Exception as e:
             continue
     
+    st.error(f"Failed to get timestamp for height {height} from all endpoints")
     return None
 
-async def fetch_transactions(progress_bar, start_timestamp=None):
+async def fetch_transactions(start_timestamp=None):
     """Fetch contract transactions using WebSocket connection."""
     transactions = []
     page = 1
     per_page = 25
     total_fetched = 0
     max_retries = 3
+    should_stop = False
     
     try:
         # Get MongoDB connection for checking existing transactions
         client = pymongo.MongoClient(st.secrets["mongo"]["connection_string"])
         db = client["shannon-test"]
         collection = db["equinox-lp-txns"]
+        
+        # Get latest block height from database
+        latest_height = get_latest_block_height()
         
         async with websockets.connect(WS_ENDPOINT, ping_interval=None) as websocket:
             # Build query - always start from most recent
@@ -85,11 +91,8 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
             total_count = int(initial_data["result"].get("total_count", 0))
             if total_count == 0:
                 return []
-                
-            st.write(f"Total transactions available: {total_count}")
-            found_existing = False
             
-            while not found_existing:
+            while not should_stop:
                 retry_count = 0
                 success = False
                 
@@ -117,6 +120,7 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
                             
                             if not new_txs:  # No more transactions
                                 success = True
+                                should_stop = True
                                 break
                             
                             # Process transactions in smaller batches
@@ -124,24 +128,29 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
                             for i in range(0, len(new_txs), batch_size):
                                 batch = new_txs[i:i + batch_size]
                                 tx_batch = []
+                                new_heights = []
                                 
                                 for tx in batch:
-                                    # Check if transaction already exists in database
-                                    existing_tx = collection.find_one({"hash": tx.get('hash')})
+                                    tx_height = int(tx.get('height', 0))
+                                    tx_hash = tx.get('hash', '')
+                                    
+                                    # If we've gone past our last known height, we can stop after this batch
+                                    if latest_height and tx_height <= latest_height:
+                                        should_stop = True
+                                        continue
+                                    
+                                    # Check if transaction already exists
+                                    existing_tx = collection.find_one({"hash": tx_hash})
                                     if existing_tx:
-                                        found_existing = True
-                                        st.info(f"Found existing transaction at page {page}, stopping fetch")
-                                        break
+                                        continue
                                     
                                     tx_data = {
-                                        'height': tx.get('height'),
-                                        'hash': tx.get('hash'),
+                                        'height': tx_height,
+                                        'hash': tx_hash,
                                         'tx_result': tx.get('tx_result', {})
                                     }
                                     tx_batch.append(tx_data)
-                                
-                                if found_existing:
-                                    break
+                                    new_heights.append(tx_height)
                                 
                                 if tx_batch:  # Only process if we have new transactions
                                     # Fetch timestamps in parallel with limited concurrency
@@ -154,17 +163,18 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
                                         if timestamp:
                                             tx['timestamp'] = timestamp
                                             transactions.append(tx)
-                                    
-                                    # Update progress based on current page
-                                    progress = min((page * per_page) / total_count, 1.0)
-                                    progress_bar.progress(progress)
+                                        else:
+                                            st.error(f"Failed to get timestamp for transaction at height {tx['height']}, skipping")
+                                
+                                if should_stop:
+                                    break
                                 
                                 # Add a small delay between batches
                                 await asyncio.sleep(0.1)
                             
                             success = True
                             
-                            if found_existing:
+                            if should_stop:
                                 break
                             
                             page += 1
@@ -184,9 +194,6 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
                     st.error(f"Failed to process page {page} after {max_retries} attempts")
                     break
                 
-                if found_existing:
-                    break
-                
     except Exception as e:
         st.error(f"WebSocket error: {str(e)}")
         return []
@@ -195,8 +202,125 @@ async def fetch_transactions(progress_bar, start_timestamp=None):
             client.close()
     
     if transactions:
-        st.success(f"Successfully fetched {len(transactions)} new transactions")
+        st.success(f"Found {len(transactions)} new transactions")
     return transactions
+
+def store_transactions(transactions):
+    """Store transactions in MongoDB."""
+    try:
+        client = pymongo.MongoClient(st.secrets["mongo"]["connection_string"])
+        db = client["shannon-test"]
+        collection = db["equinox-lp-txns"]
+        
+        # Convert transactions to a format suitable for MongoDB
+        mongo_transactions = []
+        for tx in transactions:
+            # Extract basic transaction info
+            mongo_tx = {
+                'height': tx.get('height'),
+                'hash': tx.get('hash'),
+                'timestamp': tx.get('timestamp'),
+                'events': []
+            }
+            
+            # Process events
+            events = tx.get('tx_result', {}).get('events', [])
+            for event in events:
+                if event.get('type') == 'wasm':
+                    attrs = {attr['key']: attr['value'] for attr in event.get('attributes', [])}
+                    if attrs.get('_contract_address') == CONTRACT_ADDRESS:
+                        action = attrs.get('action')
+                        
+                        if action == 'swap':
+                            event_data = {
+                                'type': 'swap',
+                                'sender': attrs.get('sender', ''),
+                                'offer_amount': attrs.get('offer_amount', ''),
+                                'return_amount': attrs.get('return_amount', ''),
+                                'commission_amount': attrs.get('commission_amount', ''),
+                                'offer_asset': attrs.get('offer_asset', ''),
+                                'ask_asset': attrs.get('ask_asset', '')
+                            }
+                            mongo_tx['events'].append(event_data)
+                        elif action == 'provide_liquidity':
+                            # Extract amounts from transfer events
+                            transfer_events = [e for e in events if e.get('type') == 'transfer']
+                            assets = {'xastro': 0, 'eclipastro': 0}  # Track both assets
+                            
+                            for transfer in transfer_events:
+                                transfer_attrs = {attr['key']: attr['value'] for attr in transfer.get('attributes', [])}
+                                if transfer_attrs.get('recipient') == CONTRACT_ADDRESS:
+                                    amount_str = transfer_attrs.get('amount', '')
+                                    amounts = amount_str.split(',')
+                                    
+                                    for amount in amounts:
+                                        try:
+                                            # Extract numeric part and asset type
+                                            num_str = amount.split('factory/')[0].strip()
+                                            num = float(num_str)
+                                            
+                                            if 'xASTRO' in amount:
+                                                assets['xastro'] = num  # Store raw amount
+                                            elif 'eclipASTRO' in amount:
+                                                assets['eclipastro'] = num  # Store raw amount
+                                                
+                                        except (ValueError, IndexError) as e:
+                                            continue
+                            
+                            event_data = {
+                                'type': 'provide_liquidity',
+                                'sender': attrs.get('sender', ''),
+                                'xastro_amount': assets['xastro'],  # Store raw amount
+                                'eclipastro_amount': assets['eclipastro']  # Store raw amount
+                            }
+                            mongo_tx['events'].append(event_data)
+                        elif action == 'withdraw_liquidity':
+                            event_data = {
+                                'type': 'withdraw_liquidity',
+                                'sender': attrs.get('sender', ''),
+                                'refund_assets': attrs.get('refund_assets', '')
+                            }
+                            mongo_tx['events'].append(event_data)
+            
+            if mongo_tx['events']:  # Only store transactions with relevant events
+                mongo_transactions.append(mongo_tx)
+        
+        if mongo_transactions:
+            # Use update_many with upsert to handle duplicates
+            operations = [
+                pymongo.UpdateOne(
+                    {"hash": tx["hash"]},
+                    {"$set": tx},
+                    upsert=True
+                )
+                for tx in mongo_transactions
+            ]
+            result = collection.bulk_write(operations)
+            st.success(f"Successfully stored {result.upserted_count} new transactions")
+            
+    except Exception as e:
+        st.error(f"Error storing transactions in MongoDB: {str(e)}")
+    finally:
+        if 'client' in locals():
+            client.close()
+
+def get_latest_block_height():
+    """Get the block height of the most recent transaction in MongoDB."""
+    try:
+        client = pymongo.MongoClient(st.secrets["mongo"]["connection_string"])
+        db = client["shannon-test"]
+        collection = db["equinox-lp-txns"]
+        
+        # Get the most recent transaction by block height
+        latest_tx = collection.find_one(
+            sort=[("height", pymongo.DESCENDING)]
+        )
+        
+        return int(latest_tx["height"]) if latest_tx else None
+        
+    except Exception as e:
+        st.error(f"Error fetching latest block height: {str(e)}")
+        return None
 
 def parse_refund_assets(refund_assets_str):
     """Parse refund_assets string to extract xASTRO and eclipASTRO amounts."""
@@ -456,24 +580,6 @@ def get_astroport_price_data():
     
     return df
 
-def get_latest_transaction_timestamp():
-    """Get the timestamp of the most recent transaction in MongoDB."""
-    try:
-        client = pymongo.MongoClient(st.secrets["mongo"]["connection_string"])
-        db = client["shannon-test"]
-        collection = db["equinox-lp-txns"]
-        
-        # Get the most recent transaction
-        latest_tx = collection.find_one(
-            sort=[("timestamp", pymongo.DESCENDING)]
-        )
-        
-        return latest_tx["timestamp"] if latest_tx else None
-        
-    except Exception as e:
-        st.error(f"Error fetching latest transaction timestamp: {str(e)}")
-        return None
-
 def get_stored_transactions(start_timestamp=None):
     """Retrieve transactions from MongoDB."""
     try:
@@ -501,133 +607,37 @@ def get_stored_transactions(start_timestamp=None):
         st.error(f"Error retrieving transactions from MongoDB: {str(e)}")
         return []
 
-def store_transactions(transactions):
-    """Store transactions in MongoDB."""
-    try:
-        client = pymongo.MongoClient(st.secrets["mongo"]["connection_string"])
-        db = client["shannon-test"]
-        collection = db["equinox-lp-txns"]
-        
-        # Convert transactions to a format suitable for MongoDB
-        mongo_transactions = []
-        for tx in transactions:
-            # Extract basic transaction info
-            mongo_tx = {
-                'height': tx.get('height'),
-                'hash': tx.get('hash'),
-                'timestamp': tx.get('timestamp'),
-                'events': []
-            }
-            
-            # Process events
-            events = tx.get('tx_result', {}).get('events', [])
-            for event in events:
-                if event.get('type') == 'wasm':
-                    attrs = {attr['key']: attr['value'] for attr in event.get('attributes', [])}
-                    if attrs.get('_contract_address') == CONTRACT_ADDRESS:
-                        action = attrs.get('action')
-                        
-                        if action == 'swap':
-                            event_data = {
-                                'type': 'swap',
-                                'sender': attrs.get('sender', ''),
-                                'offer_amount': attrs.get('offer_amount', ''),
-                                'return_amount': attrs.get('return_amount', ''),
-                                'commission_amount': attrs.get('commission_amount', ''),
-                                'offer_asset': attrs.get('offer_asset', ''),
-                                'ask_asset': attrs.get('ask_asset', '')
-                            }
-                            mongo_tx['events'].append(event_data)
-                        elif action == 'provide_liquidity':
-                            # Extract amounts from transfer events
-                            transfer_events = [e for e in events if e.get('type') == 'transfer']
-                            assets = {'xastro': 0, 'eclipastro': 0}  # Track both assets
-                            
-                            for transfer in transfer_events:
-                                transfer_attrs = {attr['key']: attr['value'] for attr in transfer.get('attributes', [])}
-                                if transfer_attrs.get('recipient') == CONTRACT_ADDRESS:
-                                    amount_str = transfer_attrs.get('amount', '')
-                                    amounts = amount_str.split(',')
-                                    
-                                    for amount in amounts:
-                                        try:
-                                            # Extract numeric part and asset type
-                                            num_str = amount.split('factory/')[0].strip()
-                                            num = float(num_str)
-                                            
-                                            if 'xASTRO' in amount:
-                                                assets['xastro'] = num  # Store raw amount
-                                            elif 'eclipASTRO' in amount:
-                                                assets['eclipastro'] = num  # Store raw amount
-                                                
-                                        except (ValueError, IndexError) as e:
-                                            st.write(f"Error parsing amount '{amount}': {e}")
-                            
-                            event_data = {
-                                'type': 'provide_liquidity',
-                                'sender': attrs.get('sender', ''),
-                                'xastro_amount': assets['xastro'],  # Store raw amount
-                                'eclipastro_amount': assets['eclipastro']  # Store raw amount
-                            }
-                            mongo_tx['events'].append(event_data)
-                        elif action == 'withdraw_liquidity':
-                            event_data = {
-                                'type': 'withdraw_liquidity',
-                                'sender': attrs.get('sender', ''),
-                                'refund_assets': attrs.get('refund_assets', '')
-                            }
-                            mongo_tx['events'].append(event_data)
-            
-            if mongo_tx['events']:  # Only store transactions with relevant events
-                mongo_transactions.append(mongo_tx)
-        
-        if mongo_transactions:
-            # Use update_many with upsert to handle duplicates
-            operations = [
-                pymongo.UpdateOne(
-                    {"hash": tx["hash"]},
-                    {"$set": tx},
-                    upsert=True
-                )
-                for tx in mongo_transactions
-            ]
-            result = collection.bulk_write(operations)
-            st.write(f"Stored {len(mongo_transactions)} transactions in database")
-            
-    except Exception as e:
-        st.error(f"Error storing transactions in MongoDB: {str(e)}")
-
 def create_dashboard():
     st.title("Neutron Astroport LP Analytics")
     
     # Contract address
     contract_address = CONTRACT_ADDRESS
     
+    col1, col2 = st.columns(2)
+    
     # Add a button to refresh data
-    if st.button("Refresh Data"):
+    if col1.button("Refresh Data"):
+        st.rerun()
+        
+    # Add a button to flush stored transactions
+    if col2.button("Flush All Stored Transactions"):
+        client = pymongo.MongoClient(st.secrets["mongo"]["connection_string"])
+        db = client["shannon-test"]
+        collection = db["equinox-lp-txns"]
+        collection.delete_many({})
+        client.close()
+        st.success("Successfully flushed all stored transactions!")
         st.rerun()
     
-    # Create a progress bar
-    progress_bar = st.progress(0)
-    
-    # Fetch latest transaction timestamp from MongoDB
-    latest_timestamp = get_latest_transaction_timestamp()
-    
-    # Get stored transactions and fetch new ones if needed
+    # Get stored transactions and fetch new ones
     stored_transactions = get_stored_transactions()
+    new_transactions = asyncio.run(fetch_transactions())
     
-    if latest_timestamp:
-        new_transactions = asyncio.run(fetch_transactions(progress_bar, start_timestamp=latest_timestamp))
-        if new_transactions:
-            store_transactions(new_transactions)
-            transactions = get_stored_transactions()
-        else:
-            transactions = stored_transactions
+    if new_transactions:
+        store_transactions(new_transactions)
+        transactions = get_stored_transactions()
     else:
-        transactions = asyncio.run(fetch_transactions(progress_bar))
-        if transactions:
-            store_transactions(transactions)
-            transactions = get_stored_transactions()
+        transactions = stored_transactions
     
     if not transactions:
         st.error("No transactions found")
@@ -783,7 +793,7 @@ def create_dashboard():
                         go.Bar(
                             x=other_sells['timestamp'],
                             y=abs(other_sells['xastro_delta']),  # Make positive
-                            name='Sell xASTRO',
+                            name='Buy xASTRO',
                             marker_color='green',
                             width=3600000,  # 1 hour in milliseconds
                             customdata=other_sells['tx_hash'].values,
@@ -835,7 +845,7 @@ def create_dashboard():
                         go.Bar(
                             x=other_buys['timestamp'],
                             y=-abs(other_buys['return_amount']),  # Make negative
-                            name='Buy xASTRO',
+                            name='Sell xASTRO',
                             marker_color='red',
                             width=3600000,  # 1 hour in milliseconds
                             customdata=other_buys['tx_hash'].values,
@@ -1146,76 +1156,6 @@ def create_dashboard():
         
         st.plotly_chart(fig6, use_container_width=True)
     
-    # Add Swap Rates Chart
-    st.subheader("Exchange Rates Analysis")
-    
-    # Fetch swap rates data
-    xastro_to_eclip, eclip_to_xastro = get_swap_rates()
-    
-    if not xastro_to_eclip.empty and not eclip_to_xastro.empty:
-        fig_rates = go.Figure()
-        
-        # Add xASTRO to eclipASTRO exchange rate
-        fig_rates.add_trace(
-            go.Scatter(
-                x=xastro_to_eclip['timestamp'],
-                y=xastro_to_eclip['exchange_rate'],
-                name='xASTRO → eclipASTRO',
-                line=dict(color='blue'),
-                visible='legendonly'  # Hide by default but allow toggling through legend
-            )
-        )
-        
-        # Add eclipASTRO to xASTRO exchange rate
-        fig_rates.add_trace(
-            go.Scatter(
-                x=eclip_to_xastro['timestamp'],
-                y=eclip_to_xastro['exchange_rate'],
-                name='eclipASTRO → xASTRO',
-                line=dict(color='red')
-            )
-        )
-        
-        # Update layout
-        fig_rates.update_layout(
-            title='Exchange Rates Over Time',
-            xaxis_title='Time',
-            yaxis_title='Exchange Rate',
-            hovermode='x unified',
-            showlegend=True
-        )
-        
-        # Add horizontal line at ratio = 1
-        fig_rates.add_hline(
-            y=1,
-            line_dash="dash",
-            line_color="gray",
-            secondary_y=False
-        )
-        
-        st.plotly_chart(fig_rates, use_container_width=True)
-        
-        # Display some statistics
-        st.write("Latest Exchange Rates:")
-        latest_xastro_to_eclip = xastro_to_eclip.iloc[-1]
-        latest_eclip_to_xastro = eclip_to_xastro.iloc[-1]
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric(
-                "xASTRO → eclipASTRO",
-                f"{latest_xastro_to_eclip['exchange_rate']:.6f}",
-                f"Impact: {latest_xastro_to_eclip['price_impact']:.2f}%"
-            )
-        with col2:
-            st.metric(
-                "eclipASTRO → xASTRO",
-                f"{latest_eclip_to_xastro['exchange_rate']:.6f}",
-                f"Impact: {latest_eclip_to_xastro['price_impact']:.2f}%"
-            )
-    else:
-        st.warning("No swap rates data available")
-        
     # Add Astroport Price Charts
     astroport_data = get_astroport_price_data()
     
