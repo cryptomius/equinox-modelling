@@ -618,16 +618,6 @@ def create_dashboard():
     # Add a button to refresh data
     if col1.button("Refresh Data"):
         st.rerun()
-        
-    # Add a button to flush stored transactions
-    if col2.button("Flush All Stored Transactions"):
-        client = pymongo.MongoClient(st.secrets["mongo"]["connection_string"])
-        db = client["shannon-test"]
-        collection = db["equinox-lp-txns"]
-        collection.delete_many({})
-        client.close()
-        st.success("Successfully flushed all stored transactions!")
-        st.rerun()
     
     # Get stored transactions and fetch new ones
     stored_transactions = get_stored_transactions()
