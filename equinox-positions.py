@@ -6,17 +6,28 @@ import requests
 import plotly.graph_objects as go
 import re
 import base64
+from urllib.parse import parse_qs
+import time
 
 # Constants
 LOCKDROP_CONTRACT = "neutron1zh097hf7pz3d0pz3jnt3urhyw03kmcpxfs4as6sqz4cyfjkyyzmqpvd2n5"
 LP_VAULT_CONTRACT = "neutron1d5p2lwh92040wfkrccdv5pamxtq7rsdzprfefd9v9vrh2c4lgheqvv6uyu"
 SINGLE_VAULT_CONTRACT = "neutron1qk5nn9360pyu2tta7r4hvmuxwhxj5res79knt0sntmjcnwsycqyqy2ft9n"
+VOTING_CONTRACT = "neutron19q93n64nyet24ynvw04qjqmejffkmyxakdvl08sf3n3yeyr92lrs2makhx"
 LOCK_PERIODS = {
     0: "Flexible",
     2592000: "1 Month",
     7776000: "3 Months", 
     15552000: "6 Months"
 }
+LOCK_TIERS = {
+    0: "1 Month",
+    1: "3 Months",
+    2: "6 Months",
+    3: "9 Months",
+    4: "12 Months"
+}
+PREFERRED_RPC = "wss://rpc-pulsarix.neutron-1.neutron.org/websocket"
 
 async def get_rpc_endpoints():
     """Fetch RPC endpoints from Cosmos Chain Registry"""
@@ -36,6 +47,47 @@ async def get_rpc_endpoints():
     except Exception as e:
         st.error(f"Error fetching RPC endpoints: {str(e)}")
         return ["wss://neutron-rpc.publicnode.com:443/websocket"]
+
+async def find_best_rpc():
+    """Test all RPC endpoints and return them sorted by transaction count"""
+    rpc_endpoints = await get_rpc_endpoints()
+    endpoint_counts = []
+    
+    progress_bar = st.progress(0)
+    
+    for i, endpoint in enumerate(rpc_endpoints):
+        count = await test_rpc_endpoint(endpoint)
+        if count > 0:
+            endpoint_counts.append((endpoint, count))
+        progress_bar.progress((i + 1) / len(rpc_endpoints))
+    
+    progress_bar.empty()
+    
+    # Sort by transaction count in descending order
+    endpoint_counts.sort(key=lambda x: x[1], reverse=True)
+    
+    if not endpoint_counts:
+        st.error("No working RPC endpoints found!")
+        return rpc_endpoints
+    
+    return [endpoint for endpoint, _ in endpoint_counts] + [ep for ep in rpc_endpoints if ep not in [e[0] for e in endpoint_counts]]
+
+@st.cache_data(ttl=3600)
+def get_cached_rpc_data():
+    """Get cached RPC endpoints data"""
+    if 'rpc_data' not in st.session_state:
+        return None
+    return st.session_state.rpc_data
+
+def save_rpc_data(endpoints):
+    """Save RPC endpoints data to cache"""
+    st.session_state.rpc_data = {
+        'endpoints': endpoints,
+        'timestamp': int(time.time())
+    }
+    # Clear the cache to force update
+    get_cached_rpc_data.clear()
+    return endpoints
 
 async def is_websocket_closed(websocket):
     """Check if websocket is closed"""
@@ -74,30 +126,6 @@ async def test_rpc_endpoint(endpoint):
             await websocket.close()
     except Exception:
         return 0
-
-async def find_best_rpc():
-    """Test all RPC endpoints and return them sorted by transaction count"""
-    rpc_endpoints = await get_rpc_endpoints()
-    endpoint_counts = []
-    
-    progress_bar = st.progress(0)
-    
-    for i, endpoint in enumerate(rpc_endpoints):
-        count = await test_rpc_endpoint(endpoint)
-        if count > 0:
-            endpoint_counts.append((endpoint, count))
-        progress_bar.progress((i + 1) / len(rpc_endpoints))
-    
-    progress_bar.empty()
-    
-    # Sort by transaction count in descending order
-    endpoint_counts.sort(key=lambda x: x[1], reverse=True)
-    
-    if not endpoint_counts:
-        st.error("No working RPC endpoints found!")
-        return rpc_endpoints
-    
-    return [endpoint for endpoint, _ in endpoint_counts] + [ep for ep in rpc_endpoints if ep not in [e[0] for e in endpoint_counts]]
 
 async def connect_with_fallback(rpc_endpoints):
     """Try to connect to RPC endpoints with fallback"""
@@ -186,6 +214,53 @@ async def fetch_vault_info(websocket, wallet):
     
     return lp_amount, single_amounts
 
+async def query_staker_info(websocket, wallet):
+    """Fetch staker info from voting contract"""
+    query = {
+        "query_staker_info": {
+            "staker": wallet
+        }
+    }
+    return await query_contract(websocket, VOTING_CONTRACT, query)
+
+async def query_total_essence():
+    """Query total cosmic essence in existence"""
+    url = "https://rest.cosmos.directory/neutron/cosmwasm/wasm/v1/contract/neutron19q93n64nyet24ynvw04qjqmejffkmyxakdvl08sf3n3yeyr92lrs2makhx/smart/eyJxdWVyeV90b3RhbF9lc3NlbmNlIjp7fX0="
+    try:
+        response = requests.get(url)
+        data = response.json()
+        return int(int(data['data']['essence']) // 1_000_000)
+    except Exception as e:
+        st.error(f"Error querying total cosmic essence: {str(e)}")
+        return None
+
+def process_voting_data(data):
+    """Process voting power data from contract response"""
+    if not data or 'data' not in data:
+        return None
+    
+    data = data['data']
+    staked = int(data.get('funds_to_unstake', 0)) / 1_000_000
+    locked = int(data.get('funds_to_unlock', 0)) / 1_000_000
+    
+    # Process lock tier breakdown
+    lock_breakdown = {}
+    for info in data.get('locker_infos', []):
+        tier = info.get('lock_tier')
+        total_amount = sum(int(vault.get('amount', 0)) for vault in info.get('vaults', []))
+        lock_breakdown[LOCK_TIERS[tier]] = total_amount / 1_000_000
+    
+    # Get cosmic essence
+    essence_info = data.get('essence_and_rewards_info', {})
+    cosmic_essence = int(essence_info.get('essence', 0)) / 1_000_000
+    
+    return {
+        'staked': staked,
+        'locked': locked,
+        'lock_breakdown': lock_breakdown,
+        'cosmic_essence': cosmic_essence
+    }
+
 def plot_distribution(data, title):
     """Create a bar chart for distribution visualization"""
     periods = list(LOCK_PERIODS.keys())
@@ -217,20 +292,54 @@ def plot_distribution(data, title):
     
     return fig
 
+def plot_lock_distribution(lock_breakdown):
+    """Create a bar chart for lock period distribution"""
+    periods = list(lock_breakdown.keys())
+    amounts = list(lock_breakdown.values())
+    
+    fig = go.Figure(data=[
+        go.Bar(
+            x=periods,
+            y=amounts,
+            marker_color='rgb(55, 83, 109)'
+        )
+    ])
+    
+    fig.update_layout(
+        title="ECLIP Lock Period Distribution",
+        xaxis_title="Lock Period",
+        yaxis_title="ECLIP Amount",
+        showlegend=False,
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='white')
+    )
+    
+    return fig
+
 async def main():
     st.title("Equinox Position Tracker")
     
+    # Get wallet address from URL query parameter if present
+    default_wallet = st.query_params.get('wallet', '')
+    
+    # Input field for wallet address
+    wallet = st.text_input("Enter Neutron wallet address:", value=default_wallet)
+    
     # Initialize session state for RPC endpoints if not already done
     if 'healthy_rpc_endpoints' not in st.session_state:
-        with st.spinner("Finding healthy RPC endpoints..."):
-            st.session_state.healthy_rpc_endpoints = await find_best_rpc()
-            if not st.session_state.healthy_rpc_endpoints:
-                st.error("No working RPC endpoints found!")
-                return
-            st.success("RPC endpoints ready")
-    
-    # Wallet input
-    wallet = st.text_input("Enter Neutron wallet address:")
+        # Try preferred endpoint first
+        try:
+            websocket = await websockets.connect(PREFERRED_RPC, ping_interval=None)
+            await websocket.close()
+            st.session_state.healthy_rpc_endpoints = [PREFERRED_RPC]
+        except Exception:
+            # Fallback to endpoint discovery
+            with st.spinner("Finding healthy RPC endpoints..."):
+                endpoints = await find_best_rpc()
+                if not endpoints:
+                    return
+                st.session_state.healthy_rpc_endpoints = endpoints
     
     if wallet:
         # Validate wallet address
@@ -269,6 +378,35 @@ async def main():
                 with col4:
                     st.subheader("Single Sided Vault")
                     st.plotly_chart(plot_distribution(single_amounts, "Current Staking Distribution"), use_container_width=True)
+                
+                # Fetch voting power info
+                st.header("Voting Power")
+                
+                voting_data = await query_staker_info(websocket, wallet)
+                voting_info = process_voting_data(voting_data)
+                
+                if voting_info:
+                    col5, col6 = st.columns(2)
+                    
+                    with col5:
+                        st.subheader("Staked ECLIP")
+                        st.metric("Staked", f"{int(voting_info['staked']):,}")
+                    
+                    with col6:
+                        st.subheader("Locked ECLIP")
+                        st.metric("Locked", f"{int(voting_info['locked']):,}")
+                    
+                    st.subheader("Lock Tier Breakdown")
+                    st.plotly_chart(plot_lock_distribution(voting_info['lock_breakdown']), use_container_width=True)
+                    
+                    st.subheader("Cosmic Essence")
+                    st.metric("Cosmic Essence", f"{int(voting_info['cosmic_essence']):,}")
+                    
+                    # Calculate and display voting power percentage
+                    total_essence = await query_total_essence()
+                    if total_essence:
+                        voting_power_pct = (voting_info['cosmic_essence'] / total_essence) * 100
+                        st.metric("Voting Power", f"{voting_power_pct:.2f}%")
             
             finally:
                 await websocket.close()
