@@ -1,7 +1,7 @@
 import streamlit as st
 import json
 import asyncio
-import websockets
+import websockets.client
 import requests
 import plotly.graph_objects as go
 import re
@@ -86,7 +86,7 @@ def save_rpc_data(endpoints):
         'timestamp': int(time.time())
     }
     # Clear the cache to force update
-    get_cached_rpc_data.clear()
+    st.cache_data.clear()
     return endpoints
 
 async def is_websocket_closed(websocket):
@@ -100,7 +100,7 @@ async def is_websocket_closed(websocket):
 async def test_rpc_endpoint(endpoint):
     """Test an RPC endpoint and return the number of transactions it reports"""
     try:
-        websocket = await websockets.connect(endpoint, ping_interval=None)
+        websocket = await websockets.client.connect(endpoint, ping_interval=None)
         try:
             query = {
                 "jsonrpc": "2.0",
@@ -131,7 +131,7 @@ async def connect_with_fallback(rpc_endpoints):
     """Try to connect to RPC endpoints with fallback"""
     for endpoint in rpc_endpoints:
         try:
-            websocket = await websockets.connect(endpoint, ping_interval=None)
+            websocket = await websockets.client.connect(endpoint, ping_interval=None)
             return websocket
         except Exception:
             continue
@@ -330,7 +330,7 @@ async def main():
     if 'healthy_rpc_endpoints' not in st.session_state:
         # Try preferred endpoint first
         try:
-            websocket = await websockets.connect(PREFERRED_RPC, ping_interval=None)
+            websocket = await websockets.client.connect(PREFERRED_RPC, ping_interval=None)
             await websocket.close()
             st.session_state.healthy_rpc_endpoints = [PREFERRED_RPC]
         except Exception:
