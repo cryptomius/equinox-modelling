@@ -138,6 +138,47 @@ try:
         # Display the chart
         st.plotly_chart(fig, use_container_width=True)
         
+        # Calculate depeg percentage over time
+        df['depeg_percentage'] = ((df['eclipastro_price_usd'] / df['astro_price_usd']) - 1) * 100
+        
+        # Calculate 10-period SMA of depeg percentage
+        df['depeg_percentage_sma'] = df['depeg_percentage'].rolling(window=10).mean()
+        
+        # Create the depeg percentage area chart
+        fig_depeg = px.area(
+            df,
+            x="timestamp",
+            y="depeg_percentage_sma",
+            title="Depeg Percentage Over Time (10-period SMA)",
+            template="plotly_dark",
+            labels={
+                "depeg_percentage_sma": "Depeg % (10-period SMA)",
+                "timestamp": "Date"
+            }
+        )
+        
+        # Customize the depeg chart
+        fig_depeg.update_layout(
+            hovermode="x unified",
+            showlegend=False
+        )
+        
+        # Update hover template
+        fig_depeg.update_traces(
+            hovertemplate='%{y:.2f}%'
+        )
+        
+        # Add a horizontal line at 0%
+        fig_depeg.add_hline(
+            y=0, 
+            line_dash="dash", 
+            line_color="white", 
+            opacity=0.5
+        )
+        
+        # Display the depeg chart
+        st.plotly_chart(fig_depeg, use_container_width=True)
+        
         # Add footnote about auto-update
         st.caption("📊 Chart automatically updates every 5 minutes")
         
