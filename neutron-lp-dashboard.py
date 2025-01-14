@@ -19,7 +19,7 @@ import pymongo
 nest_asyncio.apply()
 
 # Constants
-WS_ENDPOINT = "wss://neutron-rpc.publicnode.com:443/websocket"
+WS_ENDPOINT = "wss://rpc-voidara.neutron-1.neutron.org:443/websocket"
 CONTRACT_ADDRESS = "neutron1l9tkl663m2k3l3stzcl7mekwluj0xa8kh3sekp5qd42wh5gkevvsuzcycl"
 
 def get_block_time(height):
@@ -711,8 +711,7 @@ def create_dashboard():
                     mode='lines',
                     line=dict(color='purple', width=1.5),
                     hovertemplate='Ratio: %{y:.4f}<extra></extra>',
-                    legendrank=1,  # Make it appear first in legend
-                    zorder=1000  # Ensure it renders on top
+                    legendrank=1  # Make it appear first in legend
                 ),
                 secondary_y=False
             )
@@ -903,8 +902,7 @@ def create_dashboard():
                         mode='lines',
                         line=dict(color='purple', width=1.5),
                         hovertemplate='Ratio: %{y:.4f}<extra></extra>',
-                        legendrank=1,  # Make it appear first in legend
-                        zorder=1000  # Ensure it renders on top
+                        legendrank=1  # Make it appear first in legend
                     ),
                     secondary_y=False
                 )
