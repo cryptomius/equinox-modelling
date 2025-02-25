@@ -29,9 +29,9 @@ def get_price_data():
     client = init_connection()
     db = client["shannon-test"]
     
-    # Define the minimum start timestamp and 30-day window
+    # Define the minimum start timestamp and 90-day window
     min_start_time = datetime.fromisoformat("2024-11-19T06:15:34.499+00:00")
-    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=90)
     
     # Use the later of the two dates
     query_start_time = max(min_start_time, thirty_days_ago)
